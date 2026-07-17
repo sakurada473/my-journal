@@ -29,9 +29,9 @@
       <!-- テキストエリア（改行対応） -->
       <textarea id="journal-text" rows="4" class="w-full border-0 focus:ring-0 resize-none placeholder-gray-400 text-base outline-none" placeholder="今の気持ちや、出来事を書きましょう..."></textarea>
       
-      <!-- 写真プレビュー -->
-      <div id="photo-preview-container" class="hidden my-2 relative">
-        <img id="photo-preview" src="" class="w-full h-40 object-cover rounded-lg">
+      <!-- 写真プレビュー（全体表示に対応） -->
+      <div id="photo-preview-container" class="hidden my-2 relative bg-gray-900 rounded-lg overflow-hidden">
+        <img id="photo-preview" src="" class="w-full h-48 object-contain">
         <button id="btn-remove-photo" class="absolute top-2 right-2 bg-black/50 text-white rounded-full w-8 h-8 flex items-center justify-center"><i class="fa-solid fa-xmark"></i></button>
       </div>
 
@@ -106,16 +106,21 @@
 
   <!-- Google Map対応 位置情報編集モーダル -->
   <div id="location-modal" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 hidden">
-    <div class="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-xl flex flex-col h-[550px]">
+    <div class="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-xl flex flex-col h-[560px]">
       <div class="p-4 border-b border-gray-100 flex justify-between items-center">
         <h3 class="font-bold text-gray-700">場所を修正</h3>
         <button id="btn-close-modal" class="text-gray-400"><i class="fa-solid fa-xmark"></i></button>
       </div>
       
-      <!-- Google Places オートコンプリート入力欄 -->
+      <!-- 予測検索入力欄 -->
       <div class="p-3 border-b border-gray-100 space-y-2 relative">
         <div class="relative">
           <input type="text" id="modal-search-input" autocomplete="off" placeholder="駅名、店舗、施設名を入力（例: bizcomfort府中）..." class="w-full border border-gray-200 rounded-lg pl-3 pr-10 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          <span id="search-spinner" class="absolute right-3 top-3 text-gray-400 hidden"><i class="fa-solid fa-circle-notch animate-spin text-xs"></i></span>
+        </div>
+        <!-- 制御されたリアルタイム検索候補表示エリア -->
+        <div id="search-candidates" class="hidden absolute left-3 right-3 top-14 z-20 max-h-48 overflow-y-auto border border-gray-200 rounded-lg shadow-lg bg-white divide-y divide-gray-100">
+          <!-- JSで出力 -->
         </div>
       </div>
 
@@ -162,26 +167,24 @@
     </div>
   </div>
 
-  <!-- ★★★ Google Maps JS SDK の読み込み ★★★ -->
+  <!-- Google Maps JS SDK -->
   <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDZs4RAoKqvbAQ_vaFT7g3dhuBxXWeW3qs&libraries=places&callback=initGoogleMapLib" async defer></script>
 
   <script>
-    // 状態管理
     let posts = JSON.parse(localStorage.getItem('my_journal_posts') || '[]');
     let currentLocation = { lat: 35.6724, lng: 139.4804, name: '東京都府中市' }; 
     let selectedLocation = { ...currentLocation };
     let tempImage = null;
     
-    // Google Maps 用のオブジェクト
     let gMap = null;
     let gMarker = null;
-    let gAutocomplete = null;
+    let placesService = null; // コール数を制御するためのPlacesサービス
     let geocoder = null;
     let currentViewDate = new Date(); 
-    let isGoogleSdkLoaded = false; // SDKロード完了フラグ
-    let pendingLocation = null; // ロード前に取得したGPSデータを一時保存
+    let isGoogleSdkLoaded = false; 
+    let pendingLocation = null; 
+    let searchTimeout = null; // ★ 1.0秒待ちタイマー用
 
-    // 初期設定
     document.addEventListener('DOMContentLoaded', () => {
       initTime();
       initLocation();
@@ -190,7 +193,6 @@
       initCalendar();
     });
 
-    // 1. 日時の初期設定
     function initTime() {
       const now = new Date();
       const offset = now.getTimezoneOffset() * 60000;
@@ -198,104 +200,73 @@
       document.getElementById('journal-time').value = localISOTime;
     }
 
-    // 2. ブラウザ標準のGPS位置情報取得（順序ズレ対策強化）
     function initLocation() {
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           async (position) => {
-            const coords = {
-              lat: position.coords.latitude,
-              lng: position.coords.longitude
-            };
-            
-            // Google SDK がロード済みの場合はその場で変換
+            const coords = { lat: position.coords.latitude, lng: position.coords.longitude };
             if (isGoogleSdkLoaded && geocoder) {
               reverseGeocode(coords.lat, coords.lng);
             } else {
-              // 未ロードの場合は一時保存して、ロード完了を待つ
               pendingLocation = coords;
               document.getElementById('location-text').textContent = "位置情報を解析中...";
             }
           },
-          () => {
-            document.getElementById('location-text').textContent = "位置情報へのアクセスが拒否されました";
-          }
+          () => { document.getElementById('location-text').textContent = "位置情報が取得できませんでした"; }
         );
-      } else {
-        document.getElementById('location-text').textContent = "GPS非対応のブラウザです";
       }
     }
 
-    // ★★★ Google Maps SDK ロード完了後のコールバック ★★★
     function initGoogleMapLib() {
       geocoder = new google.maps.Geocoder();
       isGoogleSdkLoaded = true;
-      
-      // もし先にGPSから緯度経度が取れていた場合は、即座に住所変換を行う
       if (pendingLocation) {
         reverseGeocode(pendingLocation.lat, pendingLocation.lng);
         pendingLocation = null;
       } else {
-        // GPSデータがまだ届いていない場合はデフォルト表示
         reverseGeocode(currentLocation.lat, currentLocation.lng);
       }
     }
 
-    // 緯度経度からGoogleの検索データベースを使って日本語住所を逆引き
     function reverseGeocode(lat, lng) {
       if (!geocoder) return;
-      const latlng = { lat: parseFloat(lat), lng: parseFloat(lng) };
-      
-      geocoder.geocode({ location: latlng }, (results, status) => {
+      geocoder.geocode({ location: { lat: parseFloat(lat), lng: parseFloat(lng) } }, (results, status) => {
         if (status === "OK" && results[0]) {
-          const place = results[0];
-          let formattedName = place.formatted_address;
-          
-          // 日本特有の「日本、〒...」をカット
-          formattedName = formattedName.replace(/^日本、〒\d{3}-\d{4}\s*/, "");
-          
+          let formattedName = results[0].formatted_address.replace(/^日本、〒\d{3}-\d{4}\s*/, "");
           currentLocation.lat = lat;
           currentLocation.lng = lng;
           currentLocation.name = formattedName.split(" ").pop() || "現在地";
-          
           document.getElementById('location-text').textContent = currentLocation.name;
           selectedLocation = { ...currentLocation };
-        } else {
-          document.getElementById('location-text').textContent = "住所を特定できませんでした";
         }
       });
     }
 
-    // 3. Google Maps モーダル描画
     function initGoogleMapAndAutocomplete() {
       const mapDiv = document.getElementById('google-map');
-      
-      // マップが未生成の場合のみ生成
       if (!gMap) {
         gMap = new google.maps.Map(mapDiv, {
           center: { lat: selectedLocation.lat, lng: selectedLocation.lng },
           zoom: 16,
           disableDefaultUI: true,
           zoomControl: true,
-          zoomControlOptions: {
-            position: google.maps.ControlPosition.RIGHT_BOTTOM
-          }
+          zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_BOTTOM }
         });
 
-        // ピン（マーカー）の設置
         gMarker = new google.maps.Marker({
           position: { lat: selectedLocation.lat, lng: selectedLocation.lng },
           map: gMap,
           draggable: true
         });
 
-        // ドラッグイベント
+        // 検索サービスを初期化
+        placesService = new google.maps.places.PlacesService(gMap);
+
         gMarker.addListener('dragend', () => {
           const pos = gMarker.getPosition();
           updateSelectedByLatLng(pos.lat(), pos.lng());
         });
 
-        // マップクリックイベント
         gMap.addListener('click', (e) => {
           const lat = e.latLng.lat();
           const lng = e.latLng.lng();
@@ -303,62 +274,89 @@
           updateSelectedByLatLng(lat, lng);
         });
 
-        // ★★★ Google Places オートコンプリートのセットアップ ★★★
-        const input = document.getElementById('modal-search-input');
-        gAutocomplete = new google.maps.places.Autocomplete(input, {
-          componentRestrictions: { country: "jp" }, // 日本国内限定
-          fields: ["address_components", "geometry", "name"]
-        });
+        // ★ 1.0秒の猶予を持たせた、呼び出し回数を劇的に減らす予測検索ロジック
+        const searchInput = document.getElementById('modal-search-input');
+        const candidateContainer = document.getElementById('search-candidates');
+        const spinner = document.getElementById('search-spinner');
 
-        // 候補が選択されたときの処理
-        gAutocomplete.addListener('place_changed', () => {
-          const place = gAutocomplete.getPlace();
-          if (!place.geometry || !place.geometry.location) {
+        searchInput.addEventListener('input', () => {
+          clearTimeout(searchTimeout);
+          const query = searchInput.value.trim();
+
+          if (!query) {
+            candidateContainer.classList.add('hidden');
             return;
           }
 
-          const lat = place.geometry.location.lat();
-          const lng = place.geometry.location.lng();
+          spinner.classList.remove('hidden');
 
-          // マップとピンを移動
-          gMap.setCenter({ lat, lng });
-          gMap.setZoom(17);
-          gMarker.setPosition({ lat, lng });
+          // ★ パラメーターを【1.0秒 (1000ms)】に設定。入力が完全に止まってから1回だけ通信します。
+          searchTimeout = setTimeout(() => {
+            const request = {
+              query: query,
+              fields: ['name', 'geometry'],
+              componentRestrictions: { country: 'jp' }
+            };
 
-          // 状態の更新
-          selectedLocation.lat = lat;
-          selectedLocation.lng = lng;
-          selectedLocation.name = place.name; // 「bizcomfort府中」などの店舗名・施設名が直接セットされます！
-          document.getElementById('modal-selected-name').textContent = place.name;
+            // 自動監視ではなく、必要時のみテキスト検索を実行（回数節約）
+            placesService.textSearch(request, (results, status) => {
+              spinner.classList.add('hidden');
+              candidateContainer.innerHTML = '';
+
+              if (status === google.maps.places.PlacesServiceStatus.OK && results) {
+                candidateContainer.classList.remove('hidden');
+                
+                // 上位5件のみ候補表示
+                results.slice(0, 5).forEach(place => {
+                  const button = document.createElement('button');
+                  button.className = "w-full text-left px-3 py-2.5 hover:bg-indigo-50 text-gray-700 transition flex flex-col focus:outline-none";
+                  button.innerHTML = `
+                    <span class="font-bold text-gray-800 text-sm"><i class="fa-solid fa-location-dot mr-1 text-red-400"></i>${place.name}</span>
+                    <span class="text-[10px] text-gray-400 truncate mt-0.5">${place.formatted_address || ''}</span>
+                  `;
+
+                  button.addEventListener('click', () => {
+                    const lat = place.geometry.location.lat();
+                    const lng = place.geometry.location.lng();
+
+                    gMap.setCenter({ lat, lng });
+                    gMap.setZoom(17);
+                    gMarker.setPosition({ lat, lng });
+
+                    selectedLocation = { lat, lng, name: place.name };
+                    document.getElementById('modal-selected-name').textContent = place.name;
+                    candidateContainer.classList.add('hidden');
+                    searchInput.value = place.name;
+                  });
+                  candidateContainer.appendChild(button);
+                });
+              } else {
+                candidateContainer.classList.remove('hidden');
+                candidateContainer.innerHTML = '<div class="p-3 text-xs text-gray-400 text-center">見つかりませんでした</div>';
+              }
+            });
+          }, 1000); // 1.0秒のディレイ
         });
 
       } else {
-        // 二回目以降は、現在のピン位置に中心を合わせる
         gMap.setCenter({ lat: selectedLocation.lat, lng: selectedLocation.lng });
         gMarker.setPosition({ lat: selectedLocation.lat, lng: selectedLocation.lng });
       }
     }
 
-    // 緯度経度からピンを移動した際の、選択名（住所）更新処理
     function updateSelectedByLatLng(lat, lng) {
       selectedLocation.lat = lat;
       selectedLocation.lng = lng;
-      
       geocoder.geocode({ location: { lat, lng } }, (results, status) => {
         if (status === "OK" && results[0]) {
           let name = results[0].formatted_address.replace(/^日本、〒\d{3}-\d{4}\s*/, "");
           selectedLocation.name = name;
           document.getElementById('modal-selected-name').textContent = name;
-        } else {
-          selectedLocation.name = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-          document.getElementById('modal-selected-name').textContent = selectedLocation.name;
         }
       });
     }
 
-    // 4. イベントハンドラ設定
     function setupEventListeners() {
-      // 写真添付
       document.getElementById('photo-input').addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (file) {
@@ -372,14 +370,12 @@
         }
       });
 
-      // 写真クリア
       document.getElementById('btn-remove-photo').addEventListener('click', () => {
         tempImage = null;
         document.getElementById('photo-preview-container').classList.add('hidden');
         document.getElementById('photo-input').value = '';
       });
 
-      // 新規投稿
       document.getElementById('btn-submit').addEventListener('click', () => {
         const text = document.getElementById('journal-text').value.trim();
         const time = document.getElementById('journal-time').value;
@@ -400,51 +396,42 @@
         posts.unshift(newPost);
         localStorage.setItem('my_journal_posts', JSON.stringify(posts));
 
-        // フォームクリア
         document.getElementById('journal-text').value = '';
         tempImage = null;
         document.getElementById('photo-preview-container').classList.add('hidden');
         document.getElementById('photo-input').value = '';
         initTime();
-
         renderTimeline(posts);
         initCalendar();
       });
 
-      // 日記内検索
       document.getElementById('search-input').addEventListener('input', (e) => {
         const query = e.target.value.toLowerCase();
         const filtered = posts.filter(post => post.text.toLowerCase().includes(query));
         renderTimeline(filtered);
       });
 
-      // 位置情報モーダルの開閉
       document.getElementById('btn-edit-location').addEventListener('click', () => {
         document.getElementById('location-modal').classList.remove('hidden');
         document.getElementById('modal-selected-name').textContent = selectedLocation.name;
-        
-        // Google SDKがロードされていることを確認して初期化
         if (isGoogleSdkLoaded && typeof google === 'object') {
           setTimeout(() => { initGoogleMapAndAutocomplete(); }, 150);
-        } else {
-          alert('Google Map SDKの読み込み中です。しばらくしてからお試しください。');
         }
       });
 
       const closeModal = () => {
         document.getElementById('location-modal').classList.add('hidden');
+        document.getElementById('search-candidates').classList.add('hidden');
         document.getElementById('modal-search-input').value = '';
       };
 
       document.getElementById('btn-close-modal').addEventListener('click', closeModal);
       document.getElementById('btn-cancel-location').addEventListener('click', closeModal);
-
       document.getElementById('btn-save-location').addEventListener('click', () => {
         document.getElementById('location-text').textContent = selectedLocation.name;
         closeModal();
       });
 
-      // タブの切り替え
       const tabTimeline = document.getElementById('tab-timeline');
       const tabCalendar = document.getElementById('tab-calendar');
       const timelineSec = document.getElementById('timeline-section');
@@ -465,7 +452,6 @@
         timelineSec.classList.add('hidden');
       });
 
-      // 分析
       document.getElementById('btn-analysis').addEventListener('click', runWellbeingAnalysis);
       document.getElementById('btn-close-analysis').addEventListener('click', () => {
         document.getElementById('analysis-modal').classList.add('hidden');
@@ -475,7 +461,6 @@
       });
     }
 
-    // 投稿を削除する関数
     function deletePost(id) {
       if (confirm('この日記（投稿）を完全に削除しますか？')) {
         posts = posts.filter(post => post.id !== id);
@@ -485,7 +470,7 @@
       }
     }
 
-    // 5. タイムライン表示
+    // ★ 2. タイムライン表示（画像の見切れ問題を object-contain で解決）
     function renderTimeline(postsToRender) {
       const container = document.getElementById('timeline-section');
       container.innerHTML = '';
@@ -501,16 +486,19 @@
         const card = document.createElement('div');
         card.className = "bg-white p-4 rounded-2xl shadow-sm border border-gray-100 space-y-3 relative";
         
+        // 画像部分に bg-gray-900 と object-contain を適用し、比率を保ったまま全体を縮小表示
         card.innerHTML = `
           <div class="flex justify-between items-start pr-8 gap-2">
             <span class="text-xs text-indigo-500 font-semibold shrink-0">${dateStr}</span>
             <span class="text-xs text-gray-400 truncate text-right"><i class="fa-solid fa-location-dot mr-1 text-red-400"></i>${post.location.name}</span>
           </div>
-          <!-- 削除用ゴミ箱ボタン -->
           <button class="absolute top-3 right-3 text-gray-300 hover:text-red-500 p-1 transition" onclick="deletePost(${post.id})">
             <i class="fa-solid fa-trash-can text-sm"></i>
           </button>
-          ${post.image ? `<img src="${post.image}" class="w-full h-48 object-cover rounded-xl">` : ''}
+          ${post.image ? `
+            <div class="w-full h-48 bg-gray-900 rounded-xl overflow-hidden flex items-center justify-center">
+              <img src="${post.image}" class="w-full h-full object-contain">
+            </div>` : ''}
           <p class="text-gray-700 whitespace-pre-wrap text-sm leading-relaxed">${escapeHTML(post.text)}</p>
         `;
         container.appendChild(card);
@@ -518,15 +506,9 @@
     }
 
     function escapeHTML(str) {
-      return str
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
+      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
     }
 
-    // 6. カレンダーロジック
     function initCalendar() {
       const calendarTitle = document.getElementById('calendar-title');
       const calendarDays = document.getElementById('calendar-days');
@@ -534,15 +516,13 @@
 
       const year = currentViewDate.getFullYear();
       const month = currentViewDate.getMonth();
-
       calendarTitle.textContent = `${year}年 ${month + 1}月`;
 
       const firstDay = new Date(year, month, 1).getDay();
       const lastDate = new Date(year, month + 1, 0).getDate();
 
       for (let i = 0; i < firstDay; i++) {
-        const emptyCell = document.createElement('div');
-        calendarDays.appendChild(emptyCell);
+        calendarDays.appendChild(document.createElement('div'));
       }
 
       for (let day = 1; day <= lastDate; day++) {
@@ -551,9 +531,7 @@
         cell.textContent = day;
 
         const dateKey = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        const hasPost = posts.some(post => post.time.startsWith(dateKey));
-        
-        if (hasPost) {
+        if (posts.some(post => post.time.startsWith(dateKey))) {
           const dot = document.createElement('span');
           dot.className = "absolute bottom-1 w-1.5 h-1.5 bg-indigo-500 rounded-full";
           cell.appendChild(dot);
@@ -562,64 +540,37 @@
         cell.addEventListener('click', () => {
           Array.from(calendarDays.children).forEach(child => child.classList.remove('bg-indigo-600', 'text-white'));
           cell.classList.add('bg-indigo-600', 'text-white');
-
-          const filtered = posts.filter(post => post.time.startsWith(dateKey));
-          
+          renderTimeline(posts.filter(post => post.time.startsWith(dateKey)));
           document.getElementById('tab-timeline').click();
-          renderTimeline(filtered);
         });
-
         calendarDays.appendChild(cell);
       }
 
-      document.getElementById('prev-month').onclick = () => {
-        currentViewDate.setMonth(currentViewDate.getMonth() - 1);
-        initCalendar();
-      };
-      document.getElementById('next-month').onclick = () => {
-        currentViewDate.setMonth(currentViewDate.getMonth() + 1);
-        initCalendar();
-      };
+      document.getElementById('prev-month').onclick = () => { currentViewDate.setMonth(currentViewDate.getMonth() - 1); initCalendar(); };
+      document.getElementById('next-month').onclick = () => { currentViewDate.setMonth(currentViewDate.getMonth() + 1); initCalendar(); };
     }
 
-    // 7. 簡易ウェルビーイング分析
     function runWellbeingAnalysis() {
       document.getElementById('analysis-modal').classList.remove('hidden');
       const resultArea = document.getElementById('analysis-result');
       const periodArea = document.getElementById('analysis-period');
-      
       if (posts.length === 0) {
         periodArea.textContent = "投稿がありません";
-        resultArea.textContent = "分析するデータが不足しています。";
+        resultArea.textContent = "データが不足しています。";
         return;
       }
-
       const recentText = posts.slice(0, 5).map(p => p.text).join(" ");
       periodArea.textContent = `直近 ${Math.min(posts.length, 5)} 件の投稿を分析`;
 
-      const activeKeywords = ["散歩", "歩いた", "温泉", "銭湯", "サウナ", "風呂", "運動"];
-      const relaxKeywords = ["ジャズ", "ピアノ", "音楽", "読書", "ゆったり", "のんびり"];
+      const activeCount = ["散歩", "歩いた", "温泉", "銭湯", "サウナ", "風呂", "運動"].filter(k => recentText.includes(k)).length;
+      const relaxCount = ["ジャズ", "ピアノ", "音楽", "読書", "ゆったり", "のんびり"].filter(k => recentText.includes(k)).length;
 
-      let activeCount = 0;
-      let relaxCount = 0;
-
-      activeKeywords.forEach(k => { if (recentText.includes(k)) activeCount++; });
-      relaxKeywords.forEach(k => { if (recentText.includes(k)) relaxCount++; });
-
-      let advice = "日々のささやかな行動の記録は、ご自身の状態を客観的に見つめ直すための最高の手がかりになります。\n\n";
-
-      if (activeCount > 0) {
-        advice += "最近は散歩や温浴など、適度な身体活動が記録されているようです。これは心身の緊張をほぐし、自律神経のバランスを整えるのに素晴らしいアプローチです。\n\n";
-      } else {
-        advice += "少しデスクワークや室内での時間が長くなっているかもしれません。15分ほどの軽い散歩や、湯船にゆっくり浸かる時間を作るだけで、夜の休息の質がぐっと引き上がります。\n\n";
-      }
-
-      if (relaxCount > 0) {
-        advice += "また、お気に入りの音楽を聴いたり趣味に没頭したりする『デジタルから少し離れる静寂の時間』が確保できているようです。心の調和が綺麗に保たれています。";
-      } else {
-        advice += "夜のルーティンとして、照明を少し落とし、心地よいインストゥルメンタルやピアノの音色に耳を傾ける時間を取り入れてみてはいかがでしょうか。";
-      }
-
+      let advice = "日々のささやかな行動の記録は、状態を客観的に見つめ直す手がかりになります。\n\n";
+      if (activeCount > 0) advice += "最近は適度な身体活動が記録されているようです。自律神経のバランスを整えるのに素晴らしいアプローチです。\n\n";
+      else advice += "少し室内での時間が長くなっているかもしれません。15分ほどの軽い散歩や、湯船にゆっくり浸かる時間を作るだけで、休息の質が引き上がります。\n\n";
+      if (relaxCount > 0) advice += "また、お気に入りの音楽を聴くなど『静寂の時間』が確保できているようです。心の調和が綺麗に保たれています。";
+      else advice += "夜のルーティンとして、照明を少し落とし、心地よいインストゥルメンタルやピアノの音色に耳を傾ける時間を取り入れてみてはいかがでしょうか。";
+      
       resultArea.textContent = advice;
     }
   </script>
