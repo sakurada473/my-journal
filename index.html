@@ -167,10 +167,11 @@
     </div>
   </div>
 
-  <!-- Google Maps JS SDK -->
+  <!-- ★★★ Google Maps JS SDK の読み込み ★★★ -->
   <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDZs4RAoKqvbAQ_vaFT7g3dhuBxXWeW3qs&libraries=places&callback=initGoogleMapLib" async defer></script>
 
   <script>
+    // 状態管理
     let posts = JSON.parse(localStorage.getItem('my_journal_posts') || '[]');
     let currentLocation = { lat: 35.6724, lng: 139.4804, name: '東京都府中市' }; 
     let selectedLocation = { ...currentLocation };
@@ -178,12 +179,12 @@
     
     let gMap = null;
     let gMarker = null;
-    let placesService = null; // コール数を制御するためのPlacesサービス
+    let placesService = null; 
     let geocoder = null;
     let currentViewDate = new Date(); 
     let isGoogleSdkLoaded = false; 
     let pendingLocation = null; 
-    let searchTimeout = null; // ★ 1.0秒待ちタイマー用
+    let searchTimeout = null; 
 
     document.addEventListener('DOMContentLoaded', () => {
       initTime();
@@ -200,20 +201,63 @@
       document.getElementById('journal-time').value = localISOTime;
     }
 
+    // 2. ブラウザ標準のGPS位置情報取得（タイムアウトとエラー復帰処理を大幅強化）
     function initLocation() {
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          async (position) => {
-            const coords = { lat: position.coords.latitude, lng: position.coords.longitude };
-            if (isGoogleSdkLoaded && geocoder) {
-              reverseGeocode(coords.lat, coords.lng);
-            } else {
-              pendingLocation = coords;
-              document.getElementById('location-text').textContent = "位置情報を解析中...";
-            }
-          },
-          () => { document.getElementById('location-text').textContent = "位置情報が取得できませんでした"; }
-        );
+      const locText = document.getElementById('location-text');
+      
+      if (!navigator.geolocation) {
+        locText.textContent = "GPS非対応のブラウザです";
+        fallbackToDefaultLocation();
+        return;
+      }
+
+      const gpsOptions = {
+        enableHighAccuracy: false, // 屋内での取得速度を優先
+        timeout: 6000,             // 6秒待ってダメならタイムアウトエラーにする
+        maximumAge: 30000          // 30秒以内のキャッシュがあればそれを使う
+      };
+
+      locText.textContent = "位置情報を解析中...";
+
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          const coords = {
+            lat: position.coords.latitude,
+            lng: position.coords.longitude
+          };
+          
+          if (isGoogleSdkLoaded && geocoder) {
+            reverseGeocode(coords.lat, coords.lng);
+          } else {
+            pendingLocation = coords;
+          }
+        },
+        (error) => {
+          console.warn("GPS取得失敗コード:", error.code, "メッセージ:", error.message);
+          
+          let errorMsg = "位置情報を取得できませんでした";
+          if (error.code === error.PERMISSION_DENIED) {
+            errorMsg = "位置情報の利用許可がオフになっています";
+          } else if (error.code === error.POSITION_UNAVAILABLE) {
+            errorMsg = "位置情報を特定できません（電波状況不良）";
+          } else if (error.code === error.TIMEOUT) {
+            errorMsg = "位置情報の取得がタイムアウトしました";
+          }
+          
+          locText.textContent = `${errorMsg}（デフォルト：府中市）`;
+          fallbackToDefaultLocation();
+        },
+        gpsOptions
+      );
+    }
+
+    // GPS不通時のフォールバック処理
+    function fallbackToDefaultLocation() {
+      selectedLocation = { ...currentLocation }; 
+      document.getElementById('modal-selected-name').textContent = selectedLocation.name;
+      
+      if (isGoogleSdkLoaded && geocoder) {
+        reverseGeocode(currentLocation.lat, currentLocation.lng);
       }
     }
 
@@ -259,7 +303,6 @@
           draggable: true
         });
 
-        // 検索サービスを初期化
         placesService = new google.maps.places.PlacesService(gMap);
 
         gMarker.addListener('dragend', () => {
@@ -274,7 +317,6 @@
           updateSelectedByLatLng(lat, lng);
         });
 
-        // ★ 1.0秒の猶予を持たせた、呼び出し回数を劇的に減らす予測検索ロジック
         const searchInput = document.getElementById('modal-search-input');
         const candidateContainer = document.getElementById('search-candidates');
         const spinner = document.getElementById('search-spinner');
@@ -290,7 +332,7 @@
 
           spinner.classList.remove('hidden');
 
-          // ★ パラメーターを【1.0秒 (1000ms)】に設定。入力が完全に止まってから1回だけ通信します。
+          // ★ パラメーターを【1.0秒 (1000ms)】に設定。
           searchTimeout = setTimeout(() => {
             const request = {
               query: query,
@@ -298,7 +340,6 @@
               componentRestrictions: { country: 'jp' }
             };
 
-            // 自動監視ではなく、必要時のみテキスト検索を実行（回数節約）
             placesService.textSearch(request, (results, status) => {
               spinner.classList.add('hidden');
               candidateContainer.innerHTML = '';
@@ -306,7 +347,6 @@
               if (status === google.maps.places.PlacesServiceStatus.OK && results) {
                 candidateContainer.classList.remove('hidden');
                 
-                // 上位5件のみ候補表示
                 results.slice(0, 5).forEach(place => {
                   const button = document.createElement('button');
                   button.className = "w-full text-left px-3 py-2.5 hover:bg-indigo-50 text-gray-700 transition flex flex-col focus:outline-none";
@@ -335,7 +375,7 @@
                 candidateContainer.innerHTML = '<div class="p-3 text-xs text-gray-400 text-center">見つかりませんでした</div>';
               }
             });
-          }, 1000); // 1.0秒のディレイ
+          }, 1000); 
         });
 
       } else {
@@ -470,7 +510,6 @@
       }
     }
 
-    // ★ 2. タイムライン表示（画像の見切れ問題を object-contain で解決）
     function renderTimeline(postsToRender) {
       const container = document.getElementById('timeline-section');
       container.innerHTML = '';
@@ -486,7 +525,6 @@
         const card = document.createElement('div');
         card.className = "bg-white p-4 rounded-2xl shadow-sm border border-gray-100 space-y-3 relative";
         
-        // 画像部分に bg-gray-900 と object-contain を適用し、比率を保ったまま全体を縮小表示
         card.innerHTML = `
           <div class="flex justify-between items-start pr-8 gap-2">
             <span class="text-xs text-indigo-500 font-semibold shrink-0">${dateStr}</span>
@@ -560,7 +598,7 @@
         return;
       }
       const recentText = posts.slice(0, 5).map(p => p.text).join(" ");
-      periodArea.textContent = `直近 ${Math.min(posts.length, 5)} 件の投稿を分析`;
+      periodArea.textContent = `直近 ${Math.min(posts.length, 5)} 件 of 投稿を分析`;
 
       const activeCount = ["散歩", "歩いた", "温泉", "銭湯", "サウナ", "風呂", "運動"].filter(k => recentText.includes(k)).length;
       const relaxCount = ["ジャズ", "ピアノ", "音楽", "読書", "ゆったり", "のんびり"].filter(k => recentText.includes(k)).length;
